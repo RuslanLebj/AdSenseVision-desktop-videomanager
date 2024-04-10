@@ -1,73 +1,79 @@
-import tkinter as tk
-from tkinter import scrolledtext
-from threading import Thread
 import json
-import vlc
 import time
-import schedule
+import logging
+import vlc
 from datetime import datetime, timedelta
 
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# Функция для воспроизведения видео
-def play_video(video_path, duration, log_widget):
-    player = vlc.MediaPlayer(video_path)
+def read_json_schedule(file_path):
+    try:
+        with open(file_path, 'r') as file:
+            data = json.load(file)
+        logging.info("JSON data successfully loaded.")
+        return data
+    except Exception as e:
+        logging.error(f"Error reading JSON file: {e}")
+        return None
+
+def play_video(video_path, player):
+    logging.info(f"Attempting to play video: {video_path}")
+    media = player.set_media(vlc.Media(video_path))
     player.play()
-    log_widget.insert(tk.END, f"Воспроизведение: {video_path}\n")
-    time.sleep(duration)  # Время воспроизведения видео
-    player.stop()
+    time.sleep(1)  # Даем время на запуск видео
+    while player.is_playing():
+        time.sleep(1)  # Active wait until video is finished
+    logging.info(f"Video finished: {video_path}")
 
+def get_video_schedule(schedule, media_content):
+    video_schedule = []
+    for item in sorted(schedule, key=lambda x: x['queue_number']):
+        content = next((c for c in media_content if c['id'] == item['media_content']), None)
+        if content:
+            video_schedule.append(content['video'])
+    return video_schedule
 
-# Функция запуска расписания
-def run_schedule(log_widget):
-    while True:
-        schedule.run_pending()
-        time.sleep(1)
-
-
-# Функция для запуска воспроизведения видео по расписанию
-def schedule_playback(data, log_widget):
-    start_time_str = data['screen']['start_time']
+def wait_until_start_time(start_time_str):
     start_time = datetime.strptime(start_time_str, '%H:%M:%S').time()
+    now = datetime.now()
+    start_datetime = datetime.combine(now.date(), start_time)
+    if start_datetime < now:
+        start_datetime += timedelta(days=1)
+    wait_seconds = (start_datetime - now).total_seconds()
+    if wait_seconds > 0:
+        logging.info(f"Waiting until {start_datetime} to start playback ({wait_seconds} seconds)")
+        time.sleep(wait_seconds)
 
-    def playback():
-        current_time = datetime.now().time()
-        if start_time <= current_time:
-            for schedule_item in sorted(data['schedule'], key=lambda x: x['queue_number']):
-                media_content_id = schedule_item['media_content']
-                media_item = next((item for item in data['media_content'] if item['id'] == media_content_id), None)
-                if media_item:
-                    video_path = media_item['video']
-                    duration = int(timedelta(hours=int(media_item['duration'].split(':')[0]),
-                                             minutes=int(media_item['duration'].split(':')[1]),
-                                             seconds=int(media_item['duration'].split(':')[2])).total_seconds())
-                    play_video(video_path, duration, log_widget)
-            log_widget.insert(tk.END, "Воспроизведение завершено\n")
+def check_end_time(end_time_str):
+    end_time = datetime.strptime(end_time_str, '%H:%M:%S').time()
+    now = datetime.now().time()
+    return now < end_time
 
-    # Запланировать задачу на запуск
-    schedule.every().day.at(start_time_str).do(playback)
+def main():
+    schedule_data = read_json_schedule('media/videomanager_data.json')
+    if schedule_data:
+        screen_info = schedule_data['screen']
+        start_time_str = screen_info['start_time']
+        end_time_str = screen_info['end_time']
 
+        wait_until_start_time(start_time_str)
 
-# Чтение и анализ JSON-файла
-with open('media/videomanager_data.json', 'r') as file:
-    data = json.load(file)
+        video_schedule = get_video_schedule(schedule_data['schedule'], schedule_data['media_content'])
+        if video_schedule:
+            instance = vlc.Instance()
+            player = instance.media_player_new()
 
+            while check_end_time(end_time_str):
+                for video_path in video_schedule:
+                    if not check_end_time(end_time_str):
+                        logging.info("Reached the end time of the broadcast. Stopping playback.")
+                        break
+                    play_video(video_path, player)
+                    time.sleep(1)  # Пауза 1 секунду между видео
+        else:
+            logging.info("No videos to play.")
+    else:
+        logging.error("Failed to load schedule data.")
 
-# Создание интерфейса
-def create_app():
-    root = tk.Tk()
-    root.title("Видео Агент")
-
-    # Текстовое поле для логов
-    log_widget = scrolledtext.ScrolledText(root, width=70, height=10)
-    log_widget.pack(pady=10)
-
-    # Планирование воспроизведения
-    schedule_playback(data, log_widget)
-
-    # Запуск планировщика в отдельном потоке
-    Thread(target=run_schedule, args=(log_widget,), daemon=True).start()
-
-    root.mainloop()
-
-
-create_app()
+if __name__ == "__main__":
+    main()
